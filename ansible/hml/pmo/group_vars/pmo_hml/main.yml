@@ -1,0 +1,41 @@
+---
+# ---------------------------------------------------------------------------
+# Variaveis do grupo pmo_hml  (valores NAO sensiveis)
+# Segredos (AWS secret access key) ficam em secrets.yml -> NAO versionado.
+# ---------------------------------------------------------------------------
+
+# --- Atualizacao de pacotes -----------------------------------------------
+allow_reboot: true          # reinicia a instancia se /var/run/reboot-required existir
+
+# --- Disco de dados (volume secundario de 10GB) --------------------------
+data_mount_point: /data
+# Device do 2o volume EBS. Em instancias Nitro/NVMe (t3a.*) o disco de dados
+# aparece como /dev/nvme1n1 (o /dev/sdf do Terraform e apenas o nome de anexo).
+# Confirme com `lsblk` antes do primeiro run.
+data_volume_device: /dev/nvme1n1
+data_volume_fstype: ext4
+data_volume_label: pmo_data
+
+# ATENCAO: com `true` o volume e formatado (APAGA TODOS OS DADOS) a cada execucao.
+# Apos o primeiro provisionamento, mude para `false` para execucoes idempotentes.
+data_volume_force_format: false
+
+# Estrutura de diretorios do PMO
+data_dirs:
+  - "{{ data_mount_point }}/apps/cais-pmo-back-homol"
+  - "{{ data_mount_point }}/apps/cais-pmo-front-homol"
+  - "{{ data_mount_point }}/apps/proxy"
+  - "{{ data_mount_point }}/docker"
+
+# --- Docker -------------------------------------------------------------
+docker_data_root: "{{ data_mount_point }}/docker"
+docker_users:
+  - ubuntu
+
+# --- AWS CLI / ECR ----------------------------------------------------
+aws_region: us-east-1
+aws_output: json
+aws_profile_name: cais_pmo_deploy
+# aws_access_key_id e aws_secret_access_key => definidos em secrets.yml
+# ECR account id: deixe vazio para descobrir via `aws sts get-caller-identity`
+aws_ecr_account_id: ""

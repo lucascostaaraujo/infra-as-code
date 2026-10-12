@@ -1,0 +1,32 @@
+---
+# ---------------------------------------------------------------------------
+# Atualizacao de pacotes do sistema operacional
+# ---------------------------------------------------------------------------
+- name: Atualizar o indice do apt
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Aplicar atualizacoes de todos os pacotes (apt dist-upgrade)
+  ansible.builtin.apt:
+    upgrade: dist
+    autoremove: true
+    autoclean: true
+
+- name: Instalar utilitarios basicos
+  ansible.builtin.apt:
+    name: "{{ common_base_packages }}"
+    state: present
+
+- name: Verificar se ha reboot pendente
+  ansible.builtin.stat:
+    path: /var/run/reboot-required
+  register: common_reboot_required
+
+- name: Reiniciar a instancia (updates exigem reboot)
+  ansible.builtin.reboot:
+    reboot_timeout: 600
+    msg: "Reboot disparado pelo Ansible apos atualizacao de pacotes"
+  when:
+    - common_reboot_required.stat.exists
+    - allow_reboot | bool

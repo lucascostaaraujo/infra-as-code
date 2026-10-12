@@ -1,0 +1,24 @@
+---
+aws_region: us-east-1
+aws_output: json
+aws_profile_name: cais_pmo_deploy
+
+# Instalador oficial do AWS CLI v2
+awscli_installer_url: >-
+  https://awscli.amazonaws.com/awscli-exe-linux-{{
+  'x86_64' if ansible_architecture == 'x86_64' else 'aarch64' }}.zip
+
+# Usuarios que terao ~/.aws e ~/.docker configurados
+aws_cli_targets:
+  - { name: ubuntu, home: /home/ubuntu }
+  - { name: root, home: /root }
+
+# Account id do registry ECR privado. Vazio => descobre via sts get-caller-identity.
+aws_ecr_account_id: ""
+
+# Opcional: "repositorio:tag" ja existente no ECR (ex. "farol-back:latest") para
+# validar de fato um `docker pull` como root via credential helper. Vazio (padrao)
+# => pula o teste (so a autenticacao com `aws ecr get-login-password` e validada).
+aws_ecr_smoke_test_repo: ""
+
+# aws_access_key_id / aws_secret_access_key vem de group_vars/cais_interno_prod/secrets.yml

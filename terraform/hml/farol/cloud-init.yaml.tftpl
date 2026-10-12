@@ -1,0 +1,7 @@
+#cloud-config
+# O provisionamento pos-boot (disco de dados em /data, Docker e aplicacao) e
+# feito pelo Ansible -> ansible/hml/farol/
+#
+# Aqui apenas atualizamos o indice de pacotes para agilizar o primeiro run.
+package_update: true
+package_upgrade: false

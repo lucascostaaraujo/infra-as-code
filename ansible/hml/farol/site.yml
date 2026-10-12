@@ -1,0 +1,28 @@
+---
+# ===========================================================================
+# Provisionamento pos-boot do Farol Server HML
+#
+#   1. common       -> atualiza pacotes do SO
+#   2. data_volume  -> formata / monta o disco de 10GB em /data (via UUID no
+#                      fstab), backup do fstab e estrutura de diretorios
+#   3. docker       -> instala Docker + Compose, move o data-root para /data,
+#                      habilita no boot e adiciona o usuario ubuntu ao grupo
+#
+# Uso:
+#   ansible-galaxy collection install -r requirements.yml
+#   ansible-playbook site.yml
+# ===========================================================================
+- name: Provisionar Farol Server HML
+  hosts: farol_hml
+  become: true
+  gather_facts: true
+
+  roles:
+    - role: common
+      tags: [common, update]
+
+    - role: data_volume
+      tags: [disk, data_volume]
+
+    - role: docker
+      tags: [docker]

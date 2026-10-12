@@ -1,0 +1,41 @@
+---
+# Ponto de montagem do volume secundario
+data_mount_point: /data
+
+# Devices (Physical Volumes) que compoem o Volume Group LVM.
+# Para ampliar o /data no futuro: anexe um novo disco EBS, rode `lsblk`, adicione
+# o device aqui (group_vars/cais_interno_hml/main.yml) e rode a role de novo.
+# (ver comentario em group_vars/cais_interno_hml/main.yml)
+data_volume_devices:
+  - /dev/nvme1n1
+
+# Nomes do Volume Group / Logical Volume LVM
+data_volume_vg_name: data_vg
+data_volume_lv_name: data_lv
+# 100%VG => o LV ocupa todo o espaco do VG (cresce junto ao adicionar PVs)
+data_volume_lv_size: "100%VG"
+
+# Filesystem e label aplicados na formatacao
+data_volume_fstype: ext4
+data_volume_label: cais_interno_data
+
+# true  -> destroi VG/LV e reformata a cada execucao (APAGA DADOS)
+# false -> cria se nao existir e apenas estende (VG/LV/fs) em execucoes futuras
+data_volume_force_format: true
+
+# Opcoes de montagem gravadas no /etc/fstab
+data_volume_mount_opts: "defaults,nofail,x-systemd.device-timeout=10"
+
+# Estrutura de diretorios criada dentro do ponto de montagem
+data_dirs:
+  - "{{ data_mount_point }}/apps/farol-front-homol"
+  - "{{ data_mount_point }}/apps/farol-back-homol"
+  - "{{ data_mount_point }}/apps/proxy"
+  - "{{ data_mount_point }}/apps/pmo-front-homol"
+  - "{{ data_mount_point }}/apps/pmo-back-homol"
+  - "{{ data_mount_point }}/docker"
+
+# Dono / permissao dos diretorios de aplicacao
+data_dir_owner: ubuntu
+data_dir_group: ubuntu
+data_dir_mode: "0755"

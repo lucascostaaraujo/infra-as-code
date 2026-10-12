@@ -1,0 +1,144 @@
+---
+# ===========================================================================
+# Docker Engine + Compose, com data-root em /data
+# ===========================================================================
+
+- name: Confirmar que {{ data_mount_point }} esta montado antes de configurar o Docker
+  ansible.builtin.command: "mountpoint -q {{ data_mount_point }}"
+  changed_when: false
+
+# --- 1. Repositorio oficial do Docker ---------------------------------
+- name: Instalar pre-requisitos do repositorio
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+
+- name: Criar o diretorio de keyrings do apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Baixar a chave GPG oficial do Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Adicionar o repositorio APT do Docker
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+
+# --- 2. Instalacao ----------------------------------------------------
+- name: Instalar Docker Engine, CLI, containerd e plugins (buildx/compose)
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+
+- name: Criar shim /usr/local/bin/docker-compose -> docker compose
+  ansible.builtin.copy:
+    dest: /usr/local/bin/docker-compose
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      exec docker compose "$@"
+  when: docker_compose_shim | bool
+
+# --- 3. Mover o data-root para o disco de dados ----------------------
+- name: Parar Docker antes de mover o data-root
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - docker.service
+    - docker.socket
+
+- name: Garantir o diretorio data-root em {{ docker_data_root }}
+  ansible.builtin.file:
+    path: "{{ docker_data_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0710"
+
+- name: Verificar se o data-root ja foi migrado
+  ansible.builtin.stat:
+    path: "{{ docker_data_root }}/image"
+  register: docker_root_migrated
+
+- name: Migrar dados existentes de /var/lib/docker para {{ docker_data_root }}
+  ansible.builtin.command: "rsync -aAX --delete /var/lib/docker/ {{ docker_data_root }}/"
+  args:
+    creates: "{{ docker_data_root }}/image"
+  when: not docker_root_migrated.stat.exists
+
+- name: Arquivar o /var/lib/docker antigo
+  ansible.builtin.command: "mv /var/lib/docker /var/lib/docker.migrated-{{ ansible_date_time.date }}"
+  args:
+    removes: /var/lib/docker/image
+  when: not docker_root_migrated.stat.exists
+
+- name: Configurar /etc/docker/daemon.json (data-root + rotacao de logs)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {
+        "data-root": "{{ docker_data_root }}",
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+  notify: Reiniciar Docker
+
+# --- 4. Habilitar no boot -------------------------------------------
+- name: Habilitar e iniciar Docker/containerd no boot
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ docker_enabled_units }}"
+
+- name: Aplicar handlers pendentes (restart do Docker)
+  meta: flush_handlers
+
+# --- 5. Validacao do data-root -------------------------------------
+- name: Coletar `docker info`
+  ansible.builtin.command: docker info
+  register: docker_info
+  changed_when: false
+
+- name: Confirmar que o Docker Root Dir aponta para {{ docker_data_root }}
+  ansible.builtin.assert:
+    that:
+      - "'Docker Root Dir: ' ~ docker_data_root in docker_info.stdout"
+    fail_msg: "O Docker nao esta usando {{ docker_data_root }} como data-root."
+
+# --- 6. Grupo docker para o usuario ubuntu -------------------------
+- name: Adicionar usuarios ao grupo "docker"
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+
+- name: Lembrete sobre novo login
+  ansible.builtin.debug:
+    msg: >-
+      Usuario(s) {{ docker_users | join(', ') }} adicionado(s) ao grupo docker.
+      E necessario reconectar a sessao SSH (ou rodar `newgrp docker`) para usar
+      o docker sem sudo.

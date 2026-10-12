@@ -1,0 +1,4 @@
+# Credenciais reais - nunca versionar
+group_vars/*/secrets.yml
+secrets.yml
+*.retry

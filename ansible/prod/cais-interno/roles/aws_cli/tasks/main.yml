@@ -1,0 +1,189 @@
+---
+# ===========================================================================
+# AWS CLI v2 + credenciais + credential helper do ECR
+# ===========================================================================
+
+- name: Validar que as credenciais AWS foram fornecidas
+  ansible.builtin.assert:
+    that:
+      - aws_access_key_id is defined
+      - aws_access_key_id | length > 0
+      - aws_secret_access_key is defined
+      - aws_secret_access_key | length > 0
+    fail_msg: >-
+      Credenciais ausentes. Crie group_vars/cais_interno_prod/secrets.yml a partir de
+      group_vars/cais_interno_prod/secrets.yml.example.
+  no_log: true
+
+# --- 1. Pre-requisitos ------------------------------------------------
+- name: Instalar unzip e acl
+  ansible.builtin.apt:
+    name:
+      - unzip
+      - acl
+    state: present
+    update_cache: true
+
+- name: Verificar a versao instalada do AWS CLI
+  ansible.builtin.command: aws --version
+  register: awscli_installed
+  changed_when: false
+  failed_when: false
+
+# --- 2. AWS CLI v2 ---------------------------------------------------
+- name: Instalar o AWS CLI v2
+  when: "'aws-cli/2' not in (awscli_installed.stdout | default(''))"
+  block:
+    - name: Baixar o instalador do AWS CLI v2
+      ansible.builtin.get_url:
+        url: "{{ awscli_installer_url }}"
+        dest: /tmp/awscliv2.zip
+        mode: "0644"
+
+    - name: Extrair o instalador
+      ansible.builtin.unarchive:
+        src: /tmp/awscliv2.zip
+        dest: /tmp
+        remote_src: true
+
+    - name: Executar o instalador (install --update)
+      ansible.builtin.command: /tmp/aws/install --update
+      args:
+        creates: /usr/local/bin/aws
+
+  always:
+    - name: Limpar artefatos de instalacao
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/awscliv2.zip
+        - /tmp/aws
+
+- name: Instalar o amazon-ecr-credential-helper
+  ansible.builtin.apt:
+    name: amazon-ecr-credential-helper
+    state: present
+
+# --- 3. ~/.aws (config + credentials) por usuario -------------------
+- name: Criar ~/.aws
+  ansible.builtin.file:
+    path: "{{ item.home }}/.aws"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ aws_cli_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Escrever ~/.aws/config
+  ansible.builtin.copy:
+    dest: "{{ item.home }}/.aws/config"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+    content: |
+      [default]
+      region = {{ aws_region }}
+      output = {{ aws_output }}
+
+      [profile {{ aws_profile_name }}]
+      region = {{ aws_region }}
+      output = {{ aws_output }}
+  loop: "{{ aws_cli_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Escrever ~/.aws/credentials
+  ansible.builtin.copy:
+    dest: "{{ item.home }}/.aws/credentials"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+    content: |
+      [default]
+      aws_access_key_id = {{ aws_access_key_id }}
+      aws_secret_access_key = {{ aws_secret_access_key }}
+
+      [{{ aws_profile_name }}]
+      aws_access_key_id = {{ aws_access_key_id }}
+      aws_secret_access_key = {{ aws_secret_access_key }}
+  loop: "{{ aws_cli_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+
+# --- 4. Registry ECR + docker credential helper -------------------
+# Executado como root (usuario usado pelo pipeline de deploy via SSM).
+- name: Descobrir o AWS account id
+  ansible.builtin.command: aws sts get-caller-identity --query Account --output text
+  register: aws_sts_identity
+  changed_when: false
+  when: aws_ecr_account_id | length == 0
+  no_log: true
+
+- name: Definir registry ECR
+  ansible.builtin.set_fact:
+    aws_ecr_registry: >-
+      {{ (aws_ecr_account_id if aws_ecr_account_id | length > 0
+          else aws_sts_identity.stdout | trim)
+         }}.dkr.ecr.{{ aws_region }}.amazonaws.com
+
+- name: Criar ~/.docker
+  ansible.builtin.file:
+    path: "{{ item.home }}/.docker"
+    state: directory
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0700"
+  loop: "{{ aws_cli_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Configurar ~/.docker/config.json (credential helper do ECR)
+  ansible.builtin.copy:
+    dest: "{{ item.home }}/.docker/config.json"
+    owner: "{{ item.name }}"
+    group: "{{ item.name }}"
+    mode: "0600"
+    content: |
+      {
+        "credHelpers": {
+          "{{ aws_ecr_registry }}": "ecr-login",
+          "public.ecr.aws": "ecr-login"
+        }
+      }
+  loop: "{{ aws_cli_targets }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+# --- 5. Teste de autenticacao ------------------------------------
+# Testado como root, pois e o usuario que o pipeline de deploy usa via SSM
+# (Session Manager) para dar `docker pull` das imagens no ECR.
+- name: Testar autenticacao no ECR como root (aws ecr get-login-password)
+  ansible.builtin.command: "aws ecr get-login-password --region {{ aws_region }}"
+  register: ecr_login_test
+  changed_when: false
+  no_log: true
+
+- name: Confirmar acesso ao ECR como root
+  ansible.builtin.debug:
+    msg: >-
+      AWS CLI v2 e credenciais configuradas para root. Autenticacao no ECR OK.
+      Registry: {{ aws_ecr_registry }}
+  when: ecr_login_test.rc == 0
+
+- name: Testar docker pull via credential helper como root
+  ansible.builtin.command: "docker pull {{ aws_ecr_registry }}/{{ aws_ecr_smoke_test_repo }}"
+  register: docker_pull_test
+  changed_when: false
+  failed_when: false
+  when: aws_ecr_smoke_test_repo | length > 0
+
+- name: Confirmar docker pull via credential helper (root)
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'docker pull OK via credential helper (root).' if docker_pull_test.rc == 0
+          else 'docker pull falhou (rc=' ~ docker_pull_test.rc ~ '): ' ~ (docker_pull_test.stderr | default('')) }}
+  when: aws_ecr_smoke_test_repo | length > 0

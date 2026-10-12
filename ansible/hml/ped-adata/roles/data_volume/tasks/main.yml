@@ -1,0 +1,166 @@
+---
+# ===========================================================================
+# Volume secundario de dados  ->  LVM  ->  /data
+#
+# O(s) disco(s) EBS entram como Physical Volume no Volume Group `data_vg`; o
+# Logical Volume `data_lv` ocupa 100% do VG e e montado em /data por UUID.
+#
+# AMPLIAR O /data NO FUTURO (sem downtime, sem recriar nada):
+#   1. Terraform: adicione uma entrada em `additional_data_volumes`
+#      (terraform/hml/cais-interno) e `terraform apply` -> novo disco anexado.
+#   2. Na instancia: `lsblk` para descobrir o device novo (ex. /dev/nvme2n1).
+#   3. Adicione esse device em `data_volume_devices`
+#      (group_vars/cais_interno_hml/main.yml), com `data_volume_force_format: false`.
+#   4. `ansible-playbook site.yml --tags data_volume`
+#      -> pvcreate + vgextend + lvextend + resize2fs online.
+# ===========================================================================
+
+# --- 1. Pre-requisitos --------------------------------------------------
+- name: Instalar o LVM2
+  ansible.builtin.apt:
+    name: lvm2
+    state: present
+    update_cache: true
+
+# --- 2. Validacoes de seguranca --------------------------------------
+- name: Verificar se cada device de dados existe
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  register: dv_device_stat
+  loop: "{{ data_volume_devices }}"
+
+- name: Abortar se algum device nao for encontrado
+  ansible.builtin.fail:
+    msg: >-
+      Device {{ item.item }} nao encontrado. Rode `lsblk` na instancia e ajuste
+      data_volume_devices (group_vars/cais_interno_hml/main.yml).
+  loop: "{{ dv_device_stat.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: not item.stat.exists
+
+- name: Descobrir o device que sustenta a raiz "/"
+  ansible.builtin.set_fact:
+    dv_root_device: >-
+      {{ ansible_mounts
+         | selectattr('mount', 'equalto', '/')
+         | map(attribute='device')
+         | first }}
+
+- name: Impedir uso do disco errado (colisao com a raiz)
+  ansible.builtin.assert:
+    that:
+      - not dv_root_device.startswith(item)
+    fail_msg: >-
+      data_volume_devices contem {{ item }}, que sustenta a raiz
+      ({{ dv_root_device }}). Abortei para nao destruir o SO.
+  loop: "{{ data_volume_devices }}"
+
+# --- 3. Reformatacao destrutiva (somente com force_format) -----------
+- name: Desmontar {{ data_mount_point }} antes de reformatar
+  ansible.posix.mount:
+    path: "{{ data_mount_point }}"
+    state: unmounted
+  when: data_volume_force_format | bool
+
+- name: Remover o Volume Group anterior (force_format)
+  community.general.lvg:
+    vg: "{{ data_volume_vg_name }}"
+    state: absent
+    force: true
+  when: data_volume_force_format | bool
+
+- name: Limpar assinaturas antigas dos devices (force_format)
+  ansible.builtin.command: "wipefs --all {{ item }}"
+  loop: "{{ data_volume_devices }}"
+  when: data_volume_force_format | bool
+  changed_when: true
+
+# --- 4. LVM: PV + VG + LV -------------------------------------------
+- name: Criar / estender o Volume Group {{ data_volume_vg_name }}
+  community.general.lvg:
+    vg: "{{ data_volume_vg_name }}"
+    pvs: "{{ data_volume_devices }}"
+
+- name: Criar / estender o Logical Volume {{ data_volume_lv_name }} ({{ data_volume_lv_size }})
+  community.general.lvol:
+    vg: "{{ data_volume_vg_name }}"
+    lv: "{{ data_volume_lv_name }}"
+    size: "{{ data_volume_lv_size }}"
+    shrink: false
+
+# --- 5. Filesystem: cria e, se o LV cresceu, expande online ---------
+- name: Formatar / expandir o filesystem ({{ data_volume_fstype }}) no LV
+  community.general.filesystem:
+    fstype: "{{ data_volume_fstype }}"
+    dev: "/dev/{{ data_volume_vg_name }}/{{ data_volume_lv_name }}"
+    opts: "-L {{ data_volume_label }}"
+    resizefs: true
+    force: "{{ data_volume_force_format | bool }}"
+
+# --- 6. UUID do filesystem ----------------------------------------
+- name: Obter o UUID do filesystem
+  ansible.builtin.command: "blkid -s UUID -o value /dev/{{ data_volume_vg_name }}/{{ data_volume_lv_name }}"
+  register: dv_blkid
+  changed_when: false
+
+- name: Registrar o UUID
+  ansible.builtin.set_fact:
+    data_volume_uuid: "{{ dv_blkid.stdout | trim }}"
+
+- name: Sanidade - UUID valido
+  ansible.builtin.assert:
+    that:
+      - data_volume_uuid | length >= 32
+    fail_msg: "Nao foi possivel ler o UUID do LV /dev/{{ data_volume_vg_name }}/{{ data_volume_lv_name }}."
+
+# --- 7. Ponto de montagem + backup do fstab + montagem por UUID ----
+- name: Criar o ponto de montagem {{ data_mount_point }}
+  ansible.builtin.file:
+    path: "{{ data_mount_point }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Backup do /etc/fstab
+  ansible.builtin.copy:
+    src: /etc/fstab
+    dest: "/etc/fstab.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configurar o /etc/fstab e montar {{ data_mount_point }} por UUID
+  ansible.posix.mount:
+    path: "{{ data_mount_point }}"
+    src: "UUID={{ data_volume_uuid }}"
+    fstype: "{{ data_volume_fstype }}"
+    opts: "{{ data_volume_mount_opts }}"
+    dump: "0"
+    passno: "2"
+    state: mounted
+
+# --- 8. Montagem automatica (systemd) ---------------------------
+- name: Recarregar unidades geradas a partir do fstab
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Garantir que todos os mounts do fstab estao ativos
+  ansible.builtin.command: mount -a
+  changed_when: false
+
+- name: Confirmar que {{ data_mount_point }} e um mountpoint dedicado
+  ansible.builtin.command: "mountpoint -q {{ data_mount_point }}"
+  changed_when: false
+
+# --- 9. Estrutura de diretorios -------------------------------
+- name: Criar a estrutura de diretorios em {{ data_mount_point }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ data_dir_owner }}"
+    group: "{{ data_dir_group }}"
+    mode: "{{ data_dir_mode }}"
+  loop: "{{ data_dirs }}"

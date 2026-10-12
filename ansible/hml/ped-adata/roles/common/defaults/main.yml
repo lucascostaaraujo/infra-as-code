@@ -1,0 +1,12 @@
+---
+# Reinicia a instancia automaticamente quando os updates exigirem
+allow_reboot: true
+
+# Utilitarios basicos garantidos na maquina
+common_base_packages:
+  - curl
+  - ca-certificates
+  - gnupg
+  - rsync
+  - python3-apt
+  - unattended-upgrades

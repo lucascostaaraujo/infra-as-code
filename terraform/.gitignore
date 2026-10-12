@@ -1,0 +1,24 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+tfplan
+*.tfplan
+crash.log
+crash.*.log
+*.tfvars.local
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Chaves privadas geradas pelo Terraform (ex.: tls_private_key + local_sensitive_file)
+*.pem
+
+# Zips de deploy de Lambda gerados via data "archive_file" (build artifact)
+*.zip
+
+# manter o lock file versionado
+!.terraform.lock.hcl

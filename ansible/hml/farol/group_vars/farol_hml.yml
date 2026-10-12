@@ -1,0 +1,25 @@
+---
+# ---------------------------------------------------------------------------
+# Variaveis do grupo farol_hml
+# ---------------------------------------------------------------------------
+
+# --- Atualizacao de pacotes -------------------------------------------------
+allow_reboot: true          # reinicia a instancia se /var/run/reboot-required existir
+
+# --- Disco de dados (volume secundario de 10GB) ----------------------------
+data_mount_point: /data
+# Device do 2o volume EBS. Em instancias Nitro/NVMe (t3.*) o disco de dados
+# aparece como /dev/nvme1n1 (o /dev/sdf do Terraform e apenas o nome de anexo).
+# Confirme com `lsblk` antes do primeiro run.
+data_volume_device: /dev/nvme1n1
+data_volume_fstype: ext4
+data_volume_label: farol_data
+
+# ATENCAO: com `true` o volume e formatado (APAGA TODOS OS DADOS) a cada execucao.
+# Apos o primeiro provisionamento, mude para `false` para execucoes idempotentes.
+data_volume_force_format: true
+
+# --- Docker ---------------------------------------------------------------
+docker_data_root: "{{ data_mount_point }}/docker"
+docker_users:
+  - ubuntu

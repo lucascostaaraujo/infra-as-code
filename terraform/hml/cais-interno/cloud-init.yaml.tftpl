@@ -1,0 +1,7 @@
+#cloud-config
+# O provisionamento pos-boot (disco secundario em /data, Docker e aplicacao) e
+# feito pelo Ansible -> ansible/hml/cais-interno/
+#
+# Aqui apenas atualizamos o indice de pacotes para agilizar o primeiro run.
+package_update: true
+package_upgrade: false

@@ -1,0 +1,27 @@
+---
+# Ponto de montagem do disco de dados (definido tambem no role data_volume)
+data_mount_point: /data
+
+# Novo data-root do Docker (no disco secundario, para manter o disco do SO limpo)
+docker_data_root: "{{ data_mount_point }}/docker"
+
+# Pacotes do repositorio oficial do Docker
+docker_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# Cria /usr/local/bin/docker-compose como atalho para `docker compose`
+docker_compose_shim: true
+
+# Usuarios adicionados ao grupo "docker"
+docker_users:
+  - ubuntu
+
+# Unidades habilitadas para iniciar no boot
+docker_enabled_units:
+  - containerd
+  - docker.socket
+  - docker.service

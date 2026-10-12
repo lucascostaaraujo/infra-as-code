@@ -1,0 +1,248 @@
+---
+# ===========================================================================
+# Docker Engine + Compose, com Docker (data-root) E containerd (root) em /data
+# ===========================================================================
+
+- name: Confirmar que {{ data_mount_point }} esta montado antes de configurar o Docker
+  ansible.builtin.command: "mountpoint -q {{ data_mount_point }}"
+  changed_when: false
+
+# --- 1. Repositorio oficial do Docker ---------------------------------
+- name: Instalar pre-requisitos do repositorio
+  ansible.builtin.apt:
+    name:
+      - ca-certificates
+      - curl
+    state: present
+    update_cache: true
+
+- name: Criar o diretorio de keyrings do apt
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: "0755"
+
+- name: Baixar a chave GPG oficial do Docker
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Adicionar o repositorio APT do Docker
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ 'amd64' if ansible_architecture == 'x86_64' else ansible_architecture }}
+      signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable
+    filename: docker
+    state: present
+
+# --- 2. Instalacao ----------------------------------------------------
+- name: Instalar Docker Engine, CLI, containerd e plugins (buildx/compose)
+  ansible.builtin.apt:
+    name: "{{ docker_packages }}"
+    state: present
+    update_cache: true
+
+- name: Criar shim /usr/local/bin/docker-compose -> docker compose
+  ansible.builtin.copy:
+    dest: /usr/local/bin/docker-compose
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      exec docker compose "$@"
+  when: docker_compose_shim | bool
+
+# --- 3. Mover o data-root para o disco de dados ----------------------
+- name: Parar Docker antes de mover o data-root
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    state: stopped
+  loop:
+    - docker.service
+    - docker.socket
+
+- name: Garantir o diretorio data-root em {{ docker_data_root }}
+  ansible.builtin.file:
+    path: "{{ docker_data_root }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0710"
+
+- name: Verificar se o data-root ja foi migrado
+  ansible.builtin.stat:
+    path: "{{ docker_data_root }}/image"
+  register: docker_root_migrated
+
+- name: Migrar dados existentes de /var/lib/docker para {{ docker_data_root }}
+  ansible.builtin.command: "rsync -aAX --delete /var/lib/docker/ {{ docker_data_root }}/"
+  args:
+    creates: "{{ docker_data_root }}/image"
+  when: not docker_root_migrated.stat.exists
+
+- name: Arquivar o /var/lib/docker antigo
+  ansible.builtin.command: "mv /var/lib/docker /var/lib/docker.migrated-{{ ansible_date_time.date }}"
+  args:
+    removes: /var/lib/docker/image
+  when: not docker_root_migrated.stat.exists
+
+- name: Configurar /etc/docker/daemon.json (data-root + rotacao de logs)
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      {
+        "data-root": "{{ docker_data_root }}",
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "10m",
+          "max-file": "3"
+        }
+      }
+  notify: Reiniciar Docker
+
+# --- 3b. Mover o root do containerd para o disco de dados -----------
+# O docker-ce (apt) fala com o containerd do SISTEMA (dockerd roda com
+# --containerd=/run/containerd/containerd.sock). Com o "containerd image store"
+# (padrao no Docker >= 28) as imagens e layers ficam sob /var/lib/containerd,
+# FORA do data-root do Docker. Aqui o root do containerd tambem passa a viver
+# no disco de {{ data_mount_point }}. State (runtime) fica em /run (efemero).
+- name: Checar se o containerd ja foi realocado para o disco de dados
+  ansible.builtin.stat:
+    path: "{{ containerd_data_root }}/.relocated"
+  register: containerd_relocated
+
+- name: Realocar o root do containerd para {{ containerd_data_root }}
+  when: not containerd_relocated.stat.exists
+  block:
+    - name: Parar Docker e containerd antes de mover o root do containerd
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        state: stopped
+      loop:
+        - docker.service
+        - docker.socket
+        - containerd.service
+
+    - name: Garantir o diretorio {{ containerd_data_root }}
+      ansible.builtin.file:
+        path: "{{ containerd_data_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0711"
+
+    - name: Verificar se /var/lib/containerd existe
+      ansible.builtin.stat:
+        path: /var/lib/containerd
+      register: containerd_old_dir
+
+    - name: Migrar dados existentes de /var/lib/containerd para {{ containerd_data_root }}
+      ansible.builtin.command: "rsync -aAX --delete /var/lib/containerd/ {{ containerd_data_root }}/"
+      changed_when: true
+      when: containerd_old_dir.stat.exists
+
+    - name: Arquivar o /var/lib/containerd antigo
+      ansible.builtin.command: "mv /var/lib/containerd /var/lib/containerd.migrated-{{ ansible_date_time.iso8601_basic_short }}"
+      args:
+        removes: /var/lib/containerd
+      when: containerd_old_dir.stat.exists
+
+    - name: Recriar /var/lib/containerd vazio (compatibilidade)
+      ansible.builtin.file:
+        path: /var/lib/containerd
+        state: directory
+        owner: root
+        group: root
+        mode: "0711"
+
+    - name: Marcar o containerd como realocado
+      ansible.builtin.file:
+        path: "{{ containerd_data_root }}/.relocated"
+        state: touch
+        owner: root
+        group: root
+        mode: "0600"
+
+- name: Apontar o root do containerd para {{ containerd_data_root }} em {{ containerd_config_path }}
+  ansible.builtin.lineinfile:
+    path: "{{ containerd_config_path }}"
+    create: true
+    owner: root
+    group: root
+    mode: "0644"
+    regexp: '^\s*root\s*='
+    line: 'root = "{{ containerd_data_root }}"'
+    insertafter: BOF
+  notify: Reiniciar containerd e Docker
+
+# --- 4. Habilitar no boot -------------------------------------------
+- name: Habilitar e iniciar Docker/containerd no boot
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  loop: "{{ docker_enabled_units }}"
+
+- name: Aplicar handlers pendentes (restart do Docker)
+  meta: flush_handlers
+
+# --- 5. Validacao do data-root -------------------------------------
+- name: Coletar `docker info`
+  ansible.builtin.command: docker info
+  register: docker_info
+  changed_when: false
+
+- name: Confirmar que o Docker Root Dir aponta para {{ docker_data_root }}
+  ansible.builtin.assert:
+    that:
+      - "'Docker Root Dir: ' ~ docker_data_root in docker_info.stdout"
+    fail_msg: "O Docker nao esta usando {{ docker_data_root }} como data-root."
+
+# --- 5b. Validacao do root do containerd --------------------------
+- name: Descobrir o filesystem que sustenta {{ containerd_data_root }}
+  ansible.builtin.command: "findmnt -no TARGET --target {{ containerd_data_root }}"
+  register: containerd_root_fs
+  changed_when: false
+
+- name: Confirmar que o containerd armazena no disco de dados
+  ansible.builtin.assert:
+    that:
+      - data_mount_point in containerd_root_fs.stdout
+    fail_msg: >-
+      O root do containerd ({{ containerd_data_root }}) nao esta no disco
+      {{ data_mount_point }} (filesystem: {{ containerd_root_fs.stdout }}).
+
+- name: Confirmar que /var/lib/containerd nao esta mais acumulando dados
+  ansible.builtin.find:
+    paths: /var/lib/containerd
+    file_type: any
+    recurse: false
+  register: containerd_legacy_dir
+
+- name: Aviso se /var/lib/containerd ainda tiver conteudo
+  ansible.builtin.debug:
+    msg: >-
+      /var/lib/containerd ainda tem {{ containerd_legacy_dir.matched }} item(ns).
+      Confira `du -sh /var/lib/containerd*` e `du -sh /var/lib/docker*` na
+      instancia e remova arquivos *.migrated-* antigos que sobraram no disco raiz.
+  when: containerd_legacy_dir.matched | int > 0
+
+# --- 6. Grupo docker para o usuario ubuntu -------------------------
+- name: Adicionar usuarios ao grupo "docker"
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+
+- name: Lembrete sobre novo login
+  ansible.builtin.debug:
+    msg: >-
+      Usuario(s) {{ docker_users | join(', ') }} adicionado(s) ao grupo docker.
+      E necessario reconectar a sessao SSH (ou rodar `newgrp docker`) para usar
+      o docker sem sudo.

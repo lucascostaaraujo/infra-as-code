@@ -1,0 +1,19 @@
+---
+aws_region: us-east-1
+aws_output: json
+aws_profile_name: pd_adata_deploy
+
+# Instalador oficial do AWS CLI v2
+awscli_installer_url: >-
+  https://awscli.amazonaws.com/awscli-exe-linux-{{
+  'x86_64' if ansible_architecture == 'x86_64' else 'aarch64' }}.zip
+
+# Usuarios que terao ~/.aws e ~/.docker configurados
+aws_cli_targets:
+  - { name: ubuntu, home: /home/ubuntu }
+  - { name: root, home: /root }
+
+# Account id do registry ECR privado. Vazio => descobre via sts get-caller-identity.
+aws_ecr_account_id: ""
+
+# aws_access_key_id / aws_secret_access_key vem de group_vars/pd_adata_dev/secrets.yml

@@ -1,0 +1,126 @@
+---
+# ===========================================================================
+# Volume secundario de dados -> /data
+# ===========================================================================
+
+# --- 1. Validacoes de seguranca -------------------------------------------
+- name: Verificar se o device de dados existe
+  ansible.builtin.stat:
+    path: "{{ data_volume_device }}"
+  register: dv_device_stat
+
+- name: Abortar se o device nao for encontrado
+  ansible.builtin.fail:
+    msg: >-
+      Device {{ data_volume_device }} nao encontrado. Rode `lsblk` na instancia
+      e ajuste a variavel data_volume_device (group_vars/farol_hml.yml).
+  when: not dv_device_stat.stat.exists
+
+- name: Descobrir o device que sustenta a raiz "/"
+  ansible.builtin.set_fact:
+    dv_root_device: >-
+      {{ ansible_mounts
+         | selectattr('mount', 'equalto', '/')
+         | map(attribute='device')
+         | first }}
+
+- name: Impedir formatacao do disco errado (colisao com a raiz)
+  ansible.builtin.assert:
+    that:
+      - not dv_root_device.startswith(data_volume_device)
+    fail_msg: >-
+      data_volume_device ({{ data_volume_device }}) coincide com o disco raiz
+      ({{ dv_root_device }}). Abortei para nao destruir o SO.
+
+# --- 2. Remover heranca do cloud-init antigo (mount em /opt/farol) --------
+- name: Remover mount legado do cloud-init (/opt/farol), se existir
+  ansible.posix.mount:
+    path: /opt/farol
+    state: absent
+  when: "'/opt/farol' in (ansible_mounts | map(attribute='mount') | list)"
+
+# --- 3. Preparar / formatar o volume ------------------------------------
+- name: Garantir que o volume esta desmontado antes de formatar
+  ansible.posix.mount:
+    path: "{{ data_mount_point }}"
+    state: unmounted
+  when: data_volume_force_format | bool
+
+- name: Limpar assinaturas antigas (tabela de particao / filesystem)
+  ansible.builtin.command: "wipefs --all {{ data_volume_device }}"
+  when: data_volume_force_format | bool
+  changed_when: true
+
+- name: Formatar o volume de dados ({{ data_volume_fstype }})
+  community.general.filesystem:
+    fstype: "{{ data_volume_fstype }}"
+    dev: "{{ data_volume_device }}"
+    opts: "-L {{ data_volume_label }}"
+    force: "{{ data_volume_force_format | bool }}"
+
+# --- 4. Obter o UUID do volume ------------------------------------------
+- name: Obter o UUID do volume de dados
+  ansible.builtin.command: "blkid -s UUID -o value {{ data_volume_device }}"
+  register: dv_blkid
+  changed_when: false
+
+- name: Registrar o UUID
+  ansible.builtin.set_fact:
+    data_volume_uuid: "{{ dv_blkid.stdout | trim }}"
+
+- name: Sanidade - UUID valido
+  ansible.builtin.assert:
+    that:
+      - data_volume_uuid | length >= 32
+    fail_msg: "Nao foi possivel ler o UUID de {{ data_volume_device }}."
+
+# --- 5. Ponto de montagem + backup do fstab + montagem por UUID ----------
+- name: Criar o ponto de montagem {{ data_mount_point }}
+  ansible.builtin.file:
+    path: "{{ data_mount_point }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Backup do /etc/fstab
+  ansible.builtin.copy:
+    src: /etc/fstab
+    dest: "/etc/fstab.bak-{{ ansible_date_time.iso8601_basic_short }}"
+    remote_src: true
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Configurar o /etc/fstab e montar {{ data_mount_point }} por UUID
+  ansible.posix.mount:
+    path: "{{ data_mount_point }}"
+    src: "UUID={{ data_volume_uuid }}"
+    fstype: "{{ data_volume_fstype }}"
+    opts: "{{ data_volume_mount_opts }}"
+    dump: "0"
+    passno: "2"
+    state: mounted
+
+# --- 6. Montagem automatica (systemd) ----------------------------------
+- name: Recarregar unidades geradas a partir do fstab
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+- name: Garantir que todos os mounts do fstab estao ativos
+  ansible.builtin.command: mount -a
+  changed_when: false
+
+- name: Confirmar que {{ data_mount_point }} e um mountpoint dedicado
+  ansible.builtin.command: "mountpoint -q {{ data_mount_point }}"
+  changed_when: false
+
+# --- 7. Estrutura de diretorios ---------------------------------------
+- name: Criar a estrutura de diretorios em {{ data_mount_point }}
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ data_dir_owner }}"
+    group: "{{ data_dir_group }}"
+    mode: "{{ data_dir_mode }}"
+  loop: "{{ data_dirs }}"

@@ -1,0 +1,54 @@
+---
+# ---------------------------------------------------------------------------
+# Variaveis do grupo cais_interno_prod  (valores NAO sensiveis)
+# Segredos (AWS secret access key) ficam em secrets.yml -> NAO versionado.
+# ---------------------------------------------------------------------------
+
+# --- Atualizacao de pacotes -----------------------------------------------
+allow_reboot: true          # reinicia a instancia se /var/run/reboot-required existir
+
+# --- Disco de dados: LVM -> /data (volume secundario de 20GB) ------------
+data_mount_point: /data
+# Devices (Physical Volumes) do Volume Group LVM `data_vg`. Em instancias
+# Nitro/NVMe (t3a.*) o 1o disco de dados aparece como /dev/nvme1n1 (o /dev/sdf do
+# Terraform e apenas o nome de anexo). Confirme com `lsblk` antes do primeiro run.
+#
+# AMPLIAR O /data DEPOIS: adicione uma entrada em `additional_data_volumes` no
+# Terraform (terraform/prod/cais-interno), `apply`, rode `lsblk` na instancia,
+# acrescente o novo device nesta lista e rode `--tags data_volume`
+# (com data_volume_force_format: false) -> pvcreate + vgextend + lvextend + resize2fs.
+data_volume_devices:
+  - /dev/nvme1n1
+data_volume_vg_name: data_vg
+data_volume_lv_name: data_lv
+data_volume_lv_size: "100%VG"
+data_volume_fstype: ext4
+data_volume_label: cais_interno_data
+
+# ATENCAO: com `true` o VG/LV e destruido e o volume reformatado (APAGA TODOS OS
+# DADOS) a cada execucao. Mantenha `false` apos o primeiro provisionamento:
+# execucoes futuras apenas criam o que falta e estendem VG/LV/fs.
+data_volume_force_format: false
+
+# Estrutura de diretorios do CAIS-Interno
+data_dirs:
+  - "{{ data_mount_point }}/apps/farol-front-prod"
+  - "{{ data_mount_point }}/apps/farol-back-prod"
+  - "{{ data_mount_point }}/apps/proxy"
+  - "{{ data_mount_point }}/apps/pmo-front-prod"
+  - "{{ data_mount_point }}/apps/pmo-back-prod"
+  - "{{ data_mount_point }}/docker"
+  - "{{ data_mount_point }}/containerd"
+
+# --- Docker -------------------------------------------------------------
+docker_data_root: "{{ data_mount_point }}/docker"
+docker_users:
+  - ubuntu
+
+# --- AWS CLI / ECR ----------------------------------------------------
+aws_region: us-east-1
+aws_output: json
+aws_profile_name: cais_pmo_deploy
+# aws_access_key_id e aws_secret_access_key => definidos em secrets.yml
+# ECR account id: deixe vazio para descobrir via `aws sts get-caller-identity`
+aws_ecr_account_id: ""
